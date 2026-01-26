@@ -17,7 +17,7 @@ src/*.o
 src/.deps/
 src/Makefile
 src/Makefile.in
-src/mfoc
-src/mfoc.exe
+src/mfoc-backdoor
+src/mfoc-backdoor.exe
 stamp-h1
 

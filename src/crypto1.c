@@ -23,19 +23,22 @@
 #define SWAPENDIAN(x)\
   (x = (x >> 8 & 0xff00ff) | (x & 0xff00ff) << 8, x = x >> 16 | x << 16)
 
-struct Crypto1State *crypto1_create(uint64_t key) {
+struct Crypto1State *crypto1_create(uint64_t key)
+{
   struct Crypto1State *s = malloc(sizeof(*s));
-  int i;
-
-  for (i = 47; s && i > 0; i -= 2) {
-    s->odd  = s->odd  << 1 | BIT(key, (i - 1) ^ 7);
-    s->even = s->even << 1 | BIT(key, i ^ 7);
-  }
   return s;
 }
 void crypto1_destroy(struct Crypto1State *state)
 {
   free(state);
+}
+void crypto1_init(struct Crypto1State *s, uint64_t key)
+{
+  int i;
+  for (i = 47; s && i > 0; i -= 2) {
+    s->odd  = s->odd  << 1 | BIT(key, (i - 1) ^ 7);
+    s->even = s->even << 1 | BIT(key, i ^ 7);
+  }
 }
 void crypto1_get_lfsr(struct Crypto1State *state, uint64_t *lfsr)
 {

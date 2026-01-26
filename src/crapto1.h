@@ -28,6 +28,7 @@ extern "C" {
   struct Crypto1State {uint32_t odd, even;};
   struct Crypto1State *crypto1_create(uint64_t);
   void crypto1_destroy(struct Crypto1State *);
+  void crypto1_init(struct Crypto1State *, uint64_t);
   void crypto1_get_lfsr(struct Crypto1State *, uint64_t *);
   uint8_t crypto1_bit(struct Crypto1State *, uint8_t, int);
   uint8_t crypto1_byte(struct Crypto1State *, uint8_t, int);
