@@ -40,15 +40,21 @@ void add_key(
 
 void generate_keys(
     uint32_t nt,
-    uint64_t keystream,
+    uint8_t par,
+    uint32_t nt_enc,
+    uint8_t par_enc,
     uint32_t uid,
-    uint64_t **recovery_keys,
-    size_t *recovery_keys_len)
+    uint64_t **keys,
+    size_t *keys_len)
 {
-    struct Crypto1State *revstate, *revstate_start, s;
+    struct Crypto1State *revstate, *revstate_start;
     uint64_t lfsr;
 
-    revstate = lfsr_recovery32(keystream >> 1, nt ^ uid);
+    // Extract keystream (32 bit nonce + 1 parity bit)
+    uint32_t keystream_nt = nt_enc ^ nt;
+    uint8_t keystream_par = (par_enc ^ par) & 1;
+
+    revstate = lfsr_recovery32(keystream_nt, nt ^ uid);
     if (revstate == NULL)
     {
         fprintf(stderr, "Cannot allocate memory for revstate\n");
@@ -59,16 +65,14 @@ void generate_keys(
 
     while ((revstate->odd != 0x0) || (revstate->even != 0x0))
     {
-        s.odd = revstate->odd;
-        s.even = revstate->even;
-
         // only filtering possibility: last parity bit in keystream
-        if ((keystream & 1) == crypto1_bit(revstate, 0, 0))
+        // No feedin since we have to roll back anyways
+        if (keystream_par == filter(revstate->odd))
         {
-            lfsr_rollback_word(&s, nt ^ uid, 0);
-            crypto1_get_lfsr(&s, &lfsr);
+            lfsr_rollback_word(revstate, nt ^ uid, 0);
+            crypto1_get_lfsr(revstate, &lfsr);
 
-            add_key(lfsr, recovery_keys, recovery_keys_len);
+            add_key(lfsr, keys, keys_len);
         }
 
         revstate++;
@@ -91,11 +95,11 @@ void generate_keys(
 //
 //  Doegox, 2024, cf https://eprint.iacr.org/2024/1275 for more info
 
-static uint16_t i_lfsr16[1 << 16] = { 0 };
-static uint16_t s_lfsr16[1 << 16] = { 0 };
+uint16_t i_lfsr16[1 << 16] = { 0 };
+uint16_t s_lfsr16[1 << 16] = { 0 };
 
-static uint8_t rot_a[16] = { 0, 8, 9, 4, 6, 11, 1, 15, 12, 5, 2, 13, 10, 14, 3, 7 };
-static uint8_t rot_b[16] = { 0, 13, 1, 14, 4, 10, 15, 7, 5, 3, 8, 6, 9, 2, 12, 11 };
+const uint8_t rot_a[16] = { 0, 8, 9, 4, 6, 11, 1, 15, 12, 5, 2, 13, 10, 14, 3, 7 };
+const uint8_t rot_b[16] = { 0, 13, 1, 14, 4, 10, 15, 7, 5, 3, 8, 6, 9, 2, 12, 11 };
 
 #define MV_LFSR16(seed, dist) \
     s_lfsr16[(i_lfsr16[seed] + 65535 - dist) % 65535]

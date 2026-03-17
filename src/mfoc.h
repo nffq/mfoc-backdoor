@@ -58,8 +58,12 @@ struct mf_sector
     uint64_t key_b;
     uint32_t nt_a;
     uint32_t nt_b;
-    uint64_t keystr_a;
-    uint64_t keystr_b;
+    uint32_t nt_enc_a;
+    uint32_t nt_enc_b;
+    uint8_t par_a;
+    uint8_t par_b;
+    uint8_t par_enc_a;
+    uint8_t par_enc_b;
 };
 
 extern const nfc_modulation nm;
@@ -81,6 +85,6 @@ void mf_device_set(nfc_property property, bool enable);
 bool mf_rats_is_2k(void);
 bool mf_read(uint8_t block, uint8_t *dest);
 bool mf_auth(uint8_t cmd, uint8_t block, uint64_t key, uint32_t uid);
-bool mf_nested_auth(uint8_t cmd, uint8_t cmd_nested, uint8_t block, uint64_t key, uint32_t uid, uint64_t *dest, bool decrypt);
+bool mf_nested_auth(uint8_t cmd, uint8_t cmd_nested, uint8_t block, uint64_t key, uint32_t uid, uint32_t *nt_dest, uint8_t *par_dest, bool decrypt);
 
 #endif
