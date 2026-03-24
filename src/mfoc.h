@@ -13,29 +13,7 @@
 // Mifare Classic 4k 32x64b + 8*256b = 40
 #define NR_TRAILERS_4k   40
 
-// Number of blocks
-// Mifare Classic Mini
-#define NR_BLOCKS_MINI 0x13
-// Mifare Classic 1k
-#define NR_BLOCKS_1k   0x3F
-// Mifare Classic 2k
-#define NR_BLOCKS_2k   0x7F
-// Mifare Classic 4k
-#define NR_BLOCKS_4k   0xFF
-
 #define MAX_FRAME_LEN 264
-
-// Used for counting nonce distances, explore [nd-value, nd+value]
-#define DEFAULT_TOLERANCE   20
-
-// Default number of distance probes
-#define DEFAULT_DIST_NR     15
-
-// Default number of probes for a key recovery for one sector
-#define DEFAULT_PROBES_NR   150
-
-// Number of sets with 32b keys
-#define DEFAULT_SETS_NR     5
 
 
 enum mf_cmd
@@ -83,8 +61,8 @@ void mf_select_target(void);
 void mf_device_set(nfc_property property, bool enable);
 
 bool mf_rats_is_2k(void);
-bool mf_read(uint8_t block, uint8_t *dest);
-bool mf_auth(uint8_t cmd, uint8_t block, uint64_t key, uint32_t uid);
-bool mf_nested_auth(uint8_t cmd, uint8_t cmd_nested, uint8_t block, uint64_t key, uint32_t uid, uint32_t *nt_dest, uint8_t *par_dest, bool decrypt);
+bool mf_read(uint8_t blk, uint8_t *blk_p);
+bool mf_auth(uint8_t cmd, uint8_t blk, uint64_t key, uint32_t uid);
+bool mf_nested_auth(uint8_t cmd, uint8_t cmd_enc, uint8_t blk, uint64_t key, uint32_t uid, uint32_t *nt_p, uint8_t *par_p, bool decrypt);
 
 #endif

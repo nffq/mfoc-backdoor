@@ -6,25 +6,6 @@
 #include "staticnested.h"
 #include "crapto1.h"
 
-#define KEY_BLOCK_SIZE 0x200
-
-void add_key(
-    uint64_t key,
-    uint64_t **keys,
-    size_t *keys_len)
-{
-    if (*keys_len % KEY_BLOCK_SIZE == 0)
-    {
-        uint64_t *arr = realloc(*keys, (*keys_len + KEY_BLOCK_SIZE) * sizeof(uint64_t));
-        if (arr == NULL)
-        {
-            fprintf(stderr, "Cannot allocate memory for keys\n");
-            exit(EXIT_FAILURE);
-        }
-        *keys = arr;
-    }
-    (*keys)[(*keys_len)++] = key;
-}
 
 // Backdoored Nested Attack
 //
@@ -38,48 +19,47 @@ void add_key(
 //
 //  Doegox, 2024, cf https://eprint.iacr.org/2024/1275 for more info
 
-void generate_keys(
+bool recover_keys(
     uint32_t nt,
-    uint8_t par,
     uint32_t nt_enc,
+    uint8_t par,
     uint8_t par_enc,
     uint32_t uid,
-    uint64_t **keys,
-    size_t *keys_len)
+    uint64_t **keys_p,
+    size_t *keys_len_p)
 {
-    struct Crypto1State *revstate, *revstate_start;
-    uint64_t lfsr;
+    if (keys_p == NULL || keys_len_p == NULL)
+        return false;
 
-    // Extract keystream (32 bit nonce + 1 parity bit)
-    uint32_t keystream_nt = nt_enc ^ nt;
-    uint8_t keystream_par = (par_enc ^ par) & 1;
+    struct Crypto1State *states = lfsr_recovery32(nt ^ nt_enc, nt ^ uid);
+    if (states == NULL)
+        return false;
 
-    revstate = lfsr_recovery32(keystream_nt, nt ^ uid);
-    if (revstate == NULL)
-    {
-        fprintf(stderr, "Cannot allocate memory for revstate\n");
-        exit(EXIT_FAILURE);
-    }
-
-    revstate_start = revstate;
-
-    while ((revstate->odd != 0x0) || (revstate->even != 0x0))
+    size_t keys_len = 0;
+    for (size_t i = 0; states[i].odd || states[i].even; i++)
     {
         // only filtering possibility: last parity bit in keystream
-        // No feedin since we have to roll back anyways
-        if (keystream_par == filter(revstate->odd))
+        if ((par ^ par_enc) == filter(states[i].odd))
         {
-            lfsr_rollback_word(revstate, nt ^ uid, 0);
-            crypto1_get_lfsr(revstate, &lfsr);
-
-            add_key(lfsr, keys, keys_len);
+            lfsr_rollback_word(states + i, nt ^ uid, 0);
+            states[keys_len++] = states[i];
         }
-
-        revstate++;
     }
 
-    crypto1_destroy(revstate_start);
+    uint64_t *keys = malloc(keys_len * sizeof(uint64_t));
+    if (keys == NULL)
+        return false;
+
+    for (size_t i = 0; i < keys_len; i++)
+        crypto1_get_lfsr(states + i, keys + i);
+
+    crypto1_destroy(states);
+
+    *keys_p = keys;
+    *keys_len_p = keys_len;
+    return true;
 }
+
 
 // Faster Backdoored Nested Attack against Fudan FM11RF08S tags
 //
