@@ -31,32 +31,38 @@ bool recover_keys(
     if (keys_p == NULL || keys_len_p == NULL)
         return false;
 
-    struct Crypto1State *states = lfsr_recovery32(nt ^ nt_enc, nt ^ uid);
+    struct Crypto1State *states, *curr_state;
+    uint64_t *keys;
+    size_t keys_len = 0;
+
+    states = lfsr_recovery32(nt ^ nt_enc, nt ^ uid);
     if (states == NULL)
         return false;
 
-    size_t keys_len = 0;
-    for (size_t i = 0; states[i].odd || states[i].even; i++)
+    curr_state = states;
+    while (curr_state->odd || curr_state->even)
     {
         // only filtering possibility: last parity bit in keystream
-        if ((par ^ par_enc) == filter(states[i].odd))
+        if ((par ^ par_enc) == filter(curr_state->odd))
         {
-            lfsr_rollback_word(states + i, nt ^ uid, 0);
-            states[keys_len++] = states[i];
+            lfsr_rollback_word(curr_state, nt ^ uid, 0);
+            states[keys_len++] = *curr_state;
         }
+
+        curr_state++;
     }
 
-    uint64_t *keys = malloc(keys_len * sizeof(uint64_t));
+    keys = malloc(keys_len * sizeof(uint64_t));
     if (keys == NULL)
         return false;
 
     for (size_t i = 0; i < keys_len; i++)
         crypto1_get_lfsr(states + i, keys + i);
 
-    crypto1_destroy(states);
-
     *keys_p = keys;
     *keys_len_p = keys_len;
+    crypto1_destroy(states);
+
     return true;
 }
 
