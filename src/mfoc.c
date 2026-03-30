@@ -402,18 +402,30 @@ int main(
         }
     }
 
-    // Initialize table for comparing LFSR states
+    // Initialize table for reversing LFSR states
     init_lfsr16_table();
+
+    // LUT for comparing states
+    uint8_t *lfsr16_common = malloc(0x10000);
+    if (lfsr16_common == NULL)
+    {
+        fprintf(stderr, "Failed to allocate memory for lfsr16_common\n");
+        exit(EXIT_FAILURE);
+    }
 
     // Now recover keys
     fprintf(stdout, "Try to recover all unknown keys...\n\n");
 
     for (uint8_t s = 0; s < num_sectors; s++)
     {
-        uint8_t lfsr16_common[0x10000] = { 0 };
+        if (sectors[s].found_key_a && sectors[s].found_key_b)
+            continue;
 
         uint64_t *recovery_keys_a, *recovery_keys_b;
         size_t recovery_keys_a_len, recovery_keys_b_len;
+
+        // Clear LUT
+        memset(lfsr16_common, 0, 0x10000);
 
         if (!sectors[s].found_key_a)
         {
@@ -617,7 +629,7 @@ dump_card:
 
             if (fp_out != NULL)
             {
-                size_t res = fwrite(block, sizeof(uint8_t), sizeof(block), fp_out);
+                size_t res = fwrite(block, 1, sizeof(block), fp_out);
                 if (res != sizeof(block))
                 {
                     fprintf(stderr, "Error, cannot write block %03d to dump\n", i);

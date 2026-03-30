@@ -81,8 +81,8 @@ bool recover_keys(
 //
 //  Doegox, 2024, cf https://eprint.iacr.org/2024/1275 for more info
 
-uint16_t i_lfsr16[1 << 16] = { 0 };
-uint16_t s_lfsr16[1 << 16] = { 0 };
+uint16_t i_lfsr16[0x10000];
+uint16_t s_lfsr16[0x10000];
 
 const uint8_t rot_a[16] = { 0, 8, 9, 4, 6, 11, 1, 15, 12, 5, 2, 13, 10, 14, 3, 7 };
 const uint8_t rot_b[16] = { 0, 13, 1, 14, 4, 10, 15, 7, 5, 3, 8, 6, 9, 2, 12, 11 };
