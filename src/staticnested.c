@@ -81,22 +81,21 @@ bool recover_keys(
 //
 //  Doegox, 2024, cf https://eprint.iacr.org/2024/1275 for more info
 
-uint16_t i_lfsr16[0x10000];
-uint16_t s_lfsr16[0x10000];
+uint16_t lfsr16_rev8[0x10000];
+uint16_t lfsr16_rev14[0x10000];
 
 const uint8_t rot_a[16] = { 0, 8, 9, 4, 6, 11, 1, 15, 12, 5, 2, 13, 10, 14, 3, 7 };
 const uint8_t rot_b[16] = { 0, 13, 1, 14, 4, 10, 15, 7, 5, 3, 8, 6, 9, 2, 12, 11 };
 
-#define MV_LFSR16(seed, dist) \
-    s_lfsr16[(i_lfsr16[seed] + 65535 - dist) % 65535]
-
 void init_lfsr16_table(void)
 {
-    for (uint16_t i = 0, x = 1; i < 65535; i++)
+    uint16_t buffer[16] = { 0 }, x = 1;
+    for (size_t i = 0; i < 65536 + 16; i++)
     {
-        i_lfsr16[(x & 0xFF) << 8 | x >> 8] = i;
-        s_lfsr16[i] = (x & 0xFF) << 8 | x >> 8;
+        lfsr16_rev8[buffer[(i + 8) % 16]] = buffer[i % 16];
+        lfsr16_rev14[buffer[(i + 14) % 16]] = buffer[i % 16];
         x = x >> 1 | (x ^ x >> 2 ^ x >> 3 ^ x >> 5) << 15;
+        buffer[i % 16] = (x & 0xFF) << 8 | x >> 8;
     }
 }
 
@@ -104,7 +103,7 @@ uint16_t compute_seednt16_nt32(
     uint32_t nt,
     uint64_t key)
 {
-    uint16_t seed = MV_LFSR16(nt >> 16, 14);
+    uint16_t seed = lfsr16_rev14[nt >> 16];
 
     for (size_t i = 0; i < 3; i++)
     {
@@ -113,14 +112,14 @@ uint16_t compute_seednt16_nt32(
         seed ^= rot_b[key & 0xF] << 4;
         key >>= 4;
 
-        seed = MV_LFSR16(seed, 8);
+        seed = lfsr16_rev8[seed];
 
         seed ^= rot_b[key & 0xF];
         key >>= 4;
         seed ^= rot_a[key & 0xF] << 4;
         key >>= 4;
 
-        seed = MV_LFSR16(seed, 8);
+        seed = lfsr16_rev8[seed];
     }
 
     return seed;

