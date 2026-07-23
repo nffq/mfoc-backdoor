@@ -19,7 +19,22 @@
 //
 //  Doegox, 2024, cf https://eprint.iacr.org/2024/1275 for more info
 
-bool recover_keys(
+bool sen_check_key(
+    uint32_t nt,
+    uint32_t nt_enc,
+    uint8_t par,
+    uint8_t par_enc,
+    uint32_t uid,
+    uint64_t key)
+{
+    struct Crypto1State pcs;
+    crypto1_init(&pcs, key);
+
+    return crypto1_word(&pcs, nt ^ uid, 0) == (nt ^ nt_enc) &&
+           filter(pcs.odd) == (par ^ par_enc);
+}
+
+bool sen_recover_keys(
     uint32_t nt,
     uint32_t nt_enc,
     uint8_t par,
@@ -28,10 +43,7 @@ bool recover_keys(
     uint64_t **keys_p,
     size_t *keys_len_p)
 {
-    if (keys_p == NULL || keys_len_p == NULL)
-        return false;
-
-    struct Crypto1State *states, *curr_state;
+    struct Crypto1State *states;
     uint64_t *keys;
     size_t keys_len = 0;
 
@@ -39,17 +51,11 @@ bool recover_keys(
     if (states == NULL)
         return false;
 
-    curr_state = states;
-    while (curr_state->odd || curr_state->even)
+    for (size_t i = 0; states[i].odd || states[i].even; i++)
     {
         // only filtering possibility: last parity bit in keystream
-        if ((par ^ par_enc) == filter(curr_state->odd))
-        {
-            lfsr_rollback_word(curr_state, nt ^ uid, 0);
-            states[keys_len++] = *curr_state;
-        }
-
-        curr_state++;
+        if (filter(states[i].odd) == (par ^ par_enc))
+            states[keys_len++] = states[i];
     }
 
     keys = malloc(keys_len * sizeof(uint64_t));
@@ -57,11 +63,15 @@ bool recover_keys(
         return false;
 
     for (size_t i = 0; i < keys_len; i++)
+    {
+        lfsr_rollback_word(states + i, nt ^ uid, 0);
         crypto1_get_lfsr(states + i, keys + i);
+    }
+
+    crypto1_destroy(states);
 
     *keys_p = keys;
     *keys_len_p = keys_len;
-    crypto1_destroy(states);
 
     return true;
 }

