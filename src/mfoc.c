@@ -565,7 +565,7 @@ int main(
 
     // Save nonces for both key A/B
     // Probe all sectors to choose num_sectors
-    for (uint8_t s = 0; s < MAX_SECTOR_CNT; s++)
+    for (size_t s = 0; s < MAX_SECTOR_CNT; s++)
     {
         printf("\rCollecting card nonces using the backdoor command... (sector %02d)  ", s);
         fflush(stdout);
@@ -589,7 +589,7 @@ int main(
 
     printf("Sector | Nt A     | Nt B     |\n");
     printf("-------+----------+----------+\n");
-    for (uint8_t s = 0; s < num_sectors; s++)
+    for (size_t s = 0; s < num_sectors; s++)
         printf("%02d     | %08llX | %08llX |\n", s, keys_a[s].nt, keys_b[s].nt);
     printf("\n");
 
@@ -602,7 +602,7 @@ int main(
         fflush(stdout);
 
         // Iterate over every sector
-        for (uint8_t s = 0; s < num_sectors; s++)
+        for (size_t s = 0; s < num_sectors; s++)
         {
             // Filter keys based on collected keystream
             if (!keys_a[s].found &&
@@ -652,7 +652,7 @@ int main(
 
     printf("Sector | Key A        | Key B        |\n");
     printf("-------+--------------+--------------+\n");
-    for (uint8_t s = 0; s < num_sectors; s++)
+    for (size_t s = 0; s < num_sectors; s++)
     {
         printf("%02d     | ", s);
         printf(keys_a[s].found ? "%012llX | " : "             | ", keys_a[s].key);
@@ -670,11 +670,8 @@ int main(
     // LUT for comparing states
     uint8_t lfsr16_common[0x10000];
 
-    for (uint8_t s = 0; s < num_sectors; s++)
+    for (size_t s = 0; s < num_sectors; s++)
     {
-        if (keys_a[s].found && keys_b[s].found)
-            continue;
-
         uint64_t *candidates_a, *candidates_b;
         size_t candidates_a_len, candidates_b_len;
 
@@ -810,7 +807,7 @@ int main(
 
     printf("Sector | Key A        | Key B        |\n");
     printf("-------+--------------+--------------+\n");
-    for (uint8_t s = 0; s < num_sectors; s++)
+    for (size_t s = 0; s < num_sectors; s++)
     {
         printf("%02d     | ", s);
         printf(keys_a[s].found ? "%012llX | " : "             | ", keys_a[s].key);
@@ -822,7 +819,7 @@ int main(
     uint8_t blocks[MAX_BLOCK_CNT][16] = { 0 };
 
     // Dump card data
-    for (uint8_t i = 0, s = 0; s < num_sectors; s++)
+    for (size_t i = 0, s = 0; s < num_sectors; s++)
     {
         printf("\rDumping all card contents... (sector %02d)  ", s);
         fflush(stdout);
@@ -851,7 +848,7 @@ int main(
     for (size_t i = 0; i < num_blocks; i++)
     {
         printf("%03d   | ", i);
-        for (uint8_t u = 0; u < 16; u++)
+        for (size_t u = 0; u < 16; u++)
             printf("%02X", blocks[i][u]);
         printf(" |\n");
     }
@@ -859,8 +856,8 @@ int main(
 
     if (fp_out != NULL)
     {
-        size_t res = fwrite(blocks, 1, num_blocks * sizeof(*blocks), fp_out);
-        if (res != num_blocks * sizeof(*blocks))
+        size_t res = fwrite(blocks, sizeof(uint8_t), num_blocks * 16, fp_out);
+        if (res != num_blocks * 16)
         {
             fprintf(stderr, "Error, cannot write data back to file\n");
             exit(EXIT_FAILURE);
